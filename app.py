@@ -4,82 +4,111 @@ import pandas_ta as ta
 import upstox_client
 from upstox_client.rest import ApiException
 import os
+from datetime import datetime
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="FnO Momentum Scanner", page_icon="📊", layout="wide")
-st.title("📊 FnO 3-TF Squeeze Scanner (Dynamic Symbol Resolver)")
+st.set_page_config(page_title="FnO Momentum Engine", page_icon="🚀", layout="wide")
+st.title("⚡ FnO 3-TF Momentum Engine & Automated Logger")
 
-# --- SIDEBAR CONFIGURATION ---
-st.sidebar.header("API & Strategy Settings")
-access_token = st.sidebar.text_input("Upstox Access Token", type="password")
+# --- LOAD SECURE ACCESS TOKEN ---
+# Pulls the year-long analytics token directly from Streamlit Settings
+if "UPSTOX_ANALYTICS_TOKEN" in st.secrets:
+    access_token = st.secrets["UPSTOX_ANALYTICS_TOKEN"]
+    st.sidebar.success("🔒 Upstox Analytics Token Connected!")
+else:
+    st.sidebar.error("❌ Missing Token! Add UPSTOX_ANALYTICS_TOKEN to Streamlit Secrets.")
+    st.stop()
 
 # Strategy Parameters
 bb_len = st.sidebar.number_input("BB Length", 20)
 bb_std = st.sidebar.number_input("BB StdDev", 2.0)
+target_pct = st.sidebar.number_input("Target Upside % (For OTM Strike)", value=5.0)
 
-# --- LOAD USER CSV WATCHLIST ---
+# --- LOAD WATCHLIST ---
 csv_filename = "fno_with_sectors.csv"
+log_filename = "forward_test_log.csv"
 
 if os.path.exists(csv_filename):
     try:
-        # Load user-provided CSV file
         watchlist_df = pd.read_csv(csv_filename)
-        st.sidebar.success(f"Loaded {len(watchlist_df)} stocks from CSV!")
-        
-        # Clean whitespaces in column strings
         watchlist_df.columns = watchlist_df.columns.str.strip()
         
-        # Enforce column checking
         if 'Symbol' not in watchlist_df.columns:
             st.error("Error: CSV must contain a column named 'Symbol'")
             st.stop()
             
-        # Sector filtering logic
         if 'Sector' in watchlist_df.columns:
             sectors = ["All Sectors"] + list(watchlist_df['Sector'].dropna().unique())
-            selected_sector = st.sidebar.selectbox("Filter by Sector", sectors)
+            selected_sector = st.sidebar.selectbox("Filter Watchlist by Sector", sectors)
             if selected_sector != "All Sectors":
                 watchlist_df = watchlist_df[watchlist_df['Sector'] == selected_sector]
         
-        with st.expander("👁️ View Target Scan Watchlist", expanded=False):
-            st.dataframe(watchlist_df)
-            
+        st.sidebar.info(f"Scanning Target: {len(watchlist_df)} Stocks")
     except Exception as e:
-        st.sidebar.error(f"Error reading CSV: {str(e)}")
+        st.sidebar.error(f"Error reading watchlist CSV: {str(e)}")
         st.stop()
 else:
-    st.sidebar.warning(f"⚠️ {csv_filename} not found in GitHub root folder. Creating a dummy layout for test.")
-    watchlist_df = pd.DataFrame({'Symbol': ['RELIANCE', 'SBIN'], 'Sector': ['Energy', 'Banking']})
+    st.sidebar.warning(f"⚠️ {csv_filename} missing from repository root.")
+    st.stop()
 
-# --- HELPER FUNCTIONS FOR UPSTOX API ---
-def get_instrument_key_by_symbol(symbol_name):
-    """Uses Upstox API to find the dynamic instrument_key via text matching"""
-    if not access_token:
-        return None
+# --- STRIKE PRICE CALCULATOR ENGINE ---
+def calculate_spread_strikes(current_price):
+    price = float(current_price)
+    
+    # Standard Indian FnO step intervals based on stock price
+    if price < 150:
+        step = 2.5
+    elif price < 500:
+        step = 5.0
+    elif price < 1500:
+        step = 10.0
+    elif price < 3000:
+        step = 20.0
+    else:
+        step = 50.0
         
+    atm_strike = round(price / step) * step
+    target_price = price * (1 + (target_pct / 100))
+    otm_strike = round(target_price / step) * step
+    
+    if otm_strike <= atm_strike:
+        otm_strike = atm_strike + step
+        
+    return int(atm_strike), int(otm_strike)
+
+# --- AUTOMATED FORWARD TEST LOGGER ---
+def log_trigger_to_csv(symbol, sector, entry_price, atm_strike, otm_strike):
+    now = datetime.now()
+    log_data = {
+        "Timestamp": [now.strftime("%Y-%m-%d %H:%M:%S")],
+        "Date": [now.strftime("%Y-%m-%d")],
+        "Symbol": [symbol],
+        "Sector": [sector],
+        "Entry_Price": [round(entry_price, 2)],
+        "ATM_Buy_Call_Strike": [atm_strike],
+        "OTM_Sell_Call_Strike": [otm_strike],
+        "Status": ["OPEN"]
+    }
+    new_log_df = pd.DataFrame(log_data)
+    
+    if not os.path.exists(log_filename):
+        new_log_df.to_csv(log_filename, index=False)
+    else:
+        # Check if symbol was already logged today to prevent duplicate rows on multiple clicks
+        existing_logs = pd.read_csv(log_filename)
+        today_str = now.strftime("%Y-%m-%d")
+        duplicate = existing_logs[(existing_logs['Symbol'] == symbol) & (existing_logs['Date'] == today_str)]
+        
+        if duplicate.empty:
+            new_log_df.to_csv(log_filename, mode='a', header=False, index=False)
+
+# --- UPSTOX DATA QUERIES ---
+def get_historical_data(symbol_name, interval):
     configuration = upstox_client.Configuration()
     configuration.access_token = access_token
     api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
     
-    try:
-        # We hit the Upstox search endpoint to match the raw ticker symbol text
-        # Documentation specifies querying via native instrument search
-        search_api = upstox_client.OrderApi(upstox_client.ApiClient(configuration))
-        
-        # Alternative native payload approach for exact trading symbol tracking
-        # Upstox syntax formatting defaults to Segment|TradingSymbol (e.g., NSE_EQ|RELIANCE)
-        # We return the mapped query layout directly to save search latency overhead
-        resolved_key = f"NSE_EQ|{str(symbol_name).strip().upper()}"
-        return resolved_key
-    except Exception:
-        return None
-
-def get_historical_data(instrument_key, interval):
-    if not access_token or not instrument_key:
-        return None
-    configuration = upstox_client.Configuration()
-    configuration.access_token = access_token
-    api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
+    instrument_key = f"NSE_EQ|{str(symbol_name).strip().upper()}"
     
     try:
         api_response = api_instance.get_historical_candle_data1(instrument_key, interval, "100")
@@ -87,7 +116,7 @@ def get_historical_data(instrument_key, interval):
             cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi']
             df = pd.DataFrame(api_response.data.candles, columns=cols)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.iloc[::-1]  # Chronological sorting for technical analysis indicators
+            df = df.iloc[::-1]  
             return df
     except ApiException:
         return None
@@ -106,79 +135,86 @@ def calculate_indicators(df):
     df['bw_ema20'] = ta.ema(df['bandwidth'], length=20)
     return df
 
-# --- BULK SCANNER EXECUTION ---
-if st.button("RUN BULK WATCHLIST SCAN 🚀"):
-    if not access_token:
-        st.error("Please enter your Upstox Access Token in the sidebar first.")
-    else:
-        results = []
-        progress_bar = st.progress(0)
-        total_stocks = len(watchlist_df)
-        
-        sec_col = 'Sector' if 'Sector' in watchlist_df.columns else None
+# --- SCANNER RUN TIME ENGINE ---
+if st.button("RUN SCANNER & LOG BREAKOUTS 🚀"):
+    results = []
+    progress_bar = st.progress(0)
+    total_stocks = len(watchlist_df)
+    
+    sec_col = 'Sector' if 'Sector' in watchlist_df.columns else None
 
-        for index, row in watchlist_df.iterrows():
-            stock_sym = row['Symbol']
-            stock_sec = row[sec_col] if sec_col else "N/A"
-            
-            # Update live engine progress counter
-            progress_bar.progress((index + 1) / total_stocks)
-            
-            # Autocraft the Upstox code format dynamically
-            inst_key = get_instrument_key_by_symbol(stock_sym)
-            
-            # Fetch technical arrays across 3 structural timeframes
-            df_day = get_historical_data(inst_key, "day")
-            df_1h = get_historical_data(inst_key, "60minute")
-            df_15m = get_historical_data(inst_key, "15minute")
-            
-            if df_day is not None and not df_day.empty and not df_1h.empty and not df_15m.empty:
-                df_day = calculate_indicators(df_day)
-                df_1h = calculate_indicators(df_1h)
-                df_15m = calculate_indicators(df_15m)
-                
-                # Check target setup alignments
-                daily_sqz = df_day['bandwidth'].iloc[-1] < df_day['bw_sma50'].iloc[-1]
-                hourly_sqz = df_1h['bandwidth'].iloc[-1] < df_1h['bw_sma50'].iloc[-1]
-                
-                curr_15 = df_15m.iloc[-1]
-                prev_15 = df_15m.iloc[-2]
-                trigger_price = curr_15['pct_b'] > 1.0
-                trigger_vol = (curr_15['bandwidth'] > curr_15['bw_ema20']) and (prev_15['bandwidth'] <= prev_15['bw_ema20'])
-                
-                # Final evaluation allocation logic
-                if daily_sqz and hourly_sqz and trigger_price and trigger_vol:
-                    status = "🚀 BUY TRIGGER"
-                elif daily_sqz and hourly_sqz:
-                    status = "⚠️ WATCHLIST (Squeezed)"
-                else:
-                    status = "❌ No Setup"
-                
-                results.append({
-                    "Symbol": stock_sym,
-                    "Sector": stock_sec,
-                    "Daily Squeeze": "ACTIVE" if daily_sqz else "No",
-                    "Hourly Squeeze": "ACTIVE" if hourly_sqz else "No",
-                    "15m Breakout": "YES" if trigger_price else "No",
-                    "Status": status
-                })
+    for index, row in watchlist_df.iterrows():
+        stock_sym = row['Symbol']
+        stock_sec = row[sec_col] if sec_col else "N/A"
         
-        # Display Results Dashboard
-        if results:
-            results_df = pd.DataFrame(results)
+        progress_bar.progress((index + 1) / total_stocks)
+        
+        df_day = get_historical_data(stock_sym, "day")
+        df_1h = get_historical_data(stock_sym, "60minute")
+        df_15m = get_historical_data(stock_sym, "15minute")
+        
+        if df_day is not None and not df_day.empty and not df_1h.empty and not df_15m.empty:
+            df_day = calculate_indicators(df_day)
+            df_1h = calculate_indicators(df_1h)
+            df_15m = calculate_indicators(df_15m)
             
-            triggers = results_df[results_df['Status'] == "🚀 BUY TRIGGER"]
-            watchlist_only = results_df[results_df['Status'] == "⚠️ WATCHLIST (Squeezed)"]
+            # Check strategy alignment conditions
+            daily_sqz = df_day['bandwidth'].iloc[-1] < df_day['bw_sma50'].iloc[-1]
+            hourly_sqz = df_1h['bandwidth'].iloc[-1] < df_1h['bw_sma50'].iloc[-1]
             
-            st.subheader("🔥 Active Buy Triggers Right Now")
-            if not triggers.empty:
-                st.success(f"Found {len(triggers)} breakouts!")
-                st.dataframe(triggers)
+            curr_15 = df_15m.iloc[-1]
+            prev_15 = df_15m.iloc[-2]
+            trigger_price = curr_15['pct_b'] > 1.0
+            trigger_vol = (curr_15['bandwidth'] > curr_15['bw_ema20']) and (prev_15['bandwidth'] <= prev_15['bw_ema20'])
+            
+            current_close = float(curr_15['close'])
+            atm_buy, otm_sell = calculate_spread_strikes(current_close)
+            
+            if daily_sqz and hourly_sqz and trigger_price and trigger_vol:
+                status = "🚀 BUY TRIGGER"
+                log_trigger_to_csv(stock_sym, stock_sec, current_close, atm_buy, otm_sell)
+            elif daily_sqz and hourly_sqz:
+                status = "⚠️ WATCHLIST (Squeezed)"
             else:
-                st.info("No active 15m breakout triggers at this moment.")
-                
-            st.subheader("⏳ Coiling Watchlist (Daily + Hourly Squeezed)")
-            if not watchlist_only.empty:
-                st.dataframe(watchlist_only)
-            else:
-                st.info("No stocks currently aligned in a dual timeframe squeeze.")
+                status = "❌ No Setup"
+            
+            results.append({
+                "Symbol": stock_sym,
+                "Sector": stock_sec,
+                "Price": round(current_close, 2),
+                "ATM Call (Buy)": atm_buy,
+                "OTM Call (Sell)": otm_sell,
+                "Status": status
+            })
+    
+    # --- UI DISPLAY MATRIX ---
+    if results:
+        results_df = pd.DataFrame(results)
+        triggers = results_df[results_df['Status'] == "🚀 BUY TRIGGER"]
+        watchlist_only = results_df[results_df['Status'] == "⚠️ WATCHLIST (Squeezed)"]
+        
+        st.subheader("🔥 Active Breakout Triggers (Logged to CSV)")
+        if not triggers.empty:
+            st.success(f"Detected {len(triggers)} new trade entries!")
+            st.dataframe(triggers[['Symbol', 'Sector', 'Price', 'ATM Call (Buy)', 'OTM Call (Sell)']])
+        else:
+            st.info("No active breakouts matching all 3-TF metrics right now.")
+            
+        st.subheader("⏳ Coiling Watchlist (Daily + Hourly Squeeze Active)")
+        if not watchlist_only.empty:
+            st.dataframe(watchlist_only[['Symbol', 'Sector', 'Price', 'ATM Call (Buy)', 'OTM Call (Sell)']])
+
+# --- HISTORICAL FORWARD LOG VIEW ---
+st.divider()
+st.subheader("📁 Historical Forward-Testing Logs Matrix")
+if os.path.exists(log_filename):
+    try:
+        history_df = pd.read_csv(log_filename)
+        st.dataframe(history_df.sort_values(by="Timestamp", ascending=False))
+        
+        csv_data = history_df.to_csv(index=False).encode('utf-8')
+        st.download_button(label="📥 Download Log File for Excel", data=csv_data, file_name="fno_forward_test_metrics.csv", mime="text/csv")
+    except Exception as e:
+        st.error(f"Error rendering log view table: {str(e)}")
+else:
+    st.info("No forward test records logged yet. Run the scanner during market hours to capture active breakouts.")
