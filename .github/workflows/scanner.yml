@@ -1,0 +1,28 @@
+name: Market Scanner
+on:
+  schedule:
+    # Runs every 15 minutes between 09:30 and 15:30 IST (04:00 to 10:00 UTC)
+    - cron: '30,45 04-09 * * 1-5'
+    - cron: '0-30/15 10 * * 1-5'
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with: {python-version: '3.12'}
+      - name: Install dependencies
+        run: pip install pandas pandas-ta upstox-python-sdk
+      - name: Run Scanner
+        env:
+          UPSTOX_ANALYTICS_TOKEN: ${{ secrets.UPSTOX_ANALYTICS_TOKEN }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
+        run: python scanner.py
+      - name: Commit Logs
+        run: |
+          git config user.name "GitHub Action"
+          git config user.email "action@github.com"
+          git add forward_test_log.csv
+          git commit -m "Auto-update logs" || exit 0
+          git push
