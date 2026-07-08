@@ -103,23 +103,40 @@ def log_trigger_to_csv(symbol, sector, entry_price, atm_strike, otm_strike):
             new_log_df.to_csv(log_filename, mode='a', header=False, index=False)
 
 # --- UPSTOX DATA QUERIES ---
+# --- FETCH DATA FROM UPSTOX ---
 def get_historical_data(symbol_name, interval):
     configuration = upstox_client.Configuration()
     configuration.access_token = access_token
     api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
     
-    instrument_key = f"NSE_EQ|{str(symbol_name).strip().upper()}"
+    # Calculate dates for the API request (Fetching last 100 days of data)
+    to_date_str = datetime.now().strftime('%Y-%m-%d')
+    from_date_str = (datetime.now() - timedelta(days=100)).strftime('%Y-%m-%d')
+    
+    # Format the instrument key correctly
+    inst_key = f"NSE_EQ|{str(symbol_name).strip().upper()}"
     
     try:
-        api_response = api_instance.get_historical_candle_data1(instrument_key, interval, "100")
+        # Use EXPLICIT keyword arguments to prevent positional errors
+        api_response = api_instance.get_historical_candle_data1(
+            instrument_key=inst_key,
+            interval=interval,
+            to_date=to_date_str,
+            from_date=from_date_str,
+            api_version="2.0"
+        )
+        
         if api_response.status == "success" and api_response.data.candles:
             cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi']
             df = pd.DataFrame(api_response.data.candles, columns=cols)
             df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.iloc[::-1]  
+            df = df.iloc[::-1]  # Reverse to chronological order
             return df
-    except ApiException:
+            
+    except ApiException as e:
+        st.error(f"Upstox API Error for {symbol_name}: {e}")
         return None
+        
     return pd.DataFrame()
 
 def calculate_indicators(df):
