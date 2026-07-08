@@ -25,7 +25,7 @@ selected_strategy = st.sidebar.selectbox("Choose Core Trading Engine", ["Squeeze
 # Universal Inputs
 bb_len = st.sidebar.number_input("BB Length", 20)
 bb_std = st.sidebar.number_input("BB StdDev", 2.0)
-target_pct = st.sidebar.number_input("Target Target % (For Option Spread)", value=5.0)
+target_pct = st.sidebar.number_input("Target % (For Option Spread)", value=5.0)
 
 if selected_strategy == "Mean Reversal":
     st.sidebar.subheader("Reversal Parameters")
@@ -134,11 +134,9 @@ def get_historical_data(symbol_name, interval):
 def calculate_indicators(df):
     if df is None or df.empty: return df
     
-    # Bollinger Bands
     bb = ta.bbands(df['close'], length=bb_len, std=bb_std)
     df = pd.concat([df, bb], axis=1)
     
-    # Ensure correct matching keys derived dynamically matching default pandas_ta layout
     bbl = f"BBL_{int(bb_len)}_{bb_std}"
     bbu = f"BBU_{int(bb_len)}_{bb_std}"
     bbm = f"BBM_{int(bb_len)}_{bb_std}"
@@ -187,17 +185,14 @@ if st.button(f"RUN {selected_strategy.upper()} SCANNER 🚀"):
                 curr_15 = df_15m.iloc[-1]
                 prev_15 = df_15m.iloc[-2]
                 
-                # Volatility Expansion check (Valid for both up and down breaks)
                 trigger_vol = (curr_15['bandwidth'] > curr_15['bw_ema20']) and (prev_15['bandwidth'] <= prev_15['bw_ema20'])
                 
                 if daily_sqz and hourly_sqz and trigger_vol:
-                    # Direction check 1: Upward Breakout
                     if curr_15['pct_b'] > 1.0:
                         status = "🚀 BUY BREAKOUT"
                         direction = "BULLISH"
                         atm_strike, otm_strike = calculate_spread_strikes(current_close, "BULLISH")
                         log_trigger_to_csv(stock_sym, stock_sec, current_close, atm_strike, otm_strike, selected_strategy, direction)
-                    # Direction check 2: Downward Breakdown
                     elif curr_15['pct_b'] < 0.0:
                         status = "📉 SELL BREAKDOWN"
                         direction = "BEARISH"
@@ -222,3 +217,8 @@ if st.button(f"RUN {selected_strategy.upper()} SCANNER 🚀"):
                     status = "🔥 BULLISH REVERSAL"
                     direction = "BULLISH"
                     atm_strike, otm_strike = calculate_spread_strikes(current_close, "BULLISH")
+                    log_trigger_to_csv(stock_sym, stock_sec, current_close, atm_strike, otm_strike, selected_strategy, direction)
+                elif day_ob and m15_cross_down:
+                    status = "🩸 BEARISH REVERSAL"
+                    direction = "BEARISH"
+                    atm_strike, otm_strike = calculate_spread_strikes(current_close, "BEARISH")
